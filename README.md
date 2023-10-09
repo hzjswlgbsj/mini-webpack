@@ -479,3 +479,177 @@ function build(graph) {
   <%}); %>
 });
 ```
+
+然后再次执行 `node index.js`，结束后查看 dist 文件夹下面的 `bundle.js` 发现代码生成正确。
+
+## 增加 loader 机制
+
+在 `example` 文件夹下面创建 `user.json` ，然后在 `main.js` 中引入，再次执行打包，发现报语法错误了，他还是把 json 文件当做 js 在处理导致无法打包。webpack 为了解决这个问题增加了 loader 机制，接下来我们也要实现一个简单版的 loader 机制，并为 json 文件增加一个 json-loader。
+
+首先阅读一下官方自定义 loader 的[指南](https://webpack.js.org/contribute/writing-a-loader/)，分析后得知主要需要两个点：
+
+- 需要一个配置文件，配置 loader 处理的文件类型
+- 接收一个 loader 函数去处理不同类型的文件，并返回翻译成 js 的代码
+
+配置文件这里就直接使用一个对象来代替，loader 就拿到外面去
+
+```javascript
+const webpackConfig = {
+  module: {
+    rules: [
+      {
+        test: /\.json$/,
+        use: jsonLoader,
+      },
+    ],
+  },
+};
+```
+
+// jsonLoader.js
+
+```javascript
+export default function jsonLoader(source) {
+  return `export default ${JSON.stringify(source)}`;
+}
+```
+
+思考一下我们应该在那个步骤来执行 loader 动作呢，很明显是在 babel 转化代码之前，修改一下 index.js
+
+```javascript
+import fs from "fs";
+import parser from "@babel/parser";
+import traverse from "@babel/traverse";
+import path from "path";
+import ejs from "ejs";
+import { transformFromAst } from "babel-core";
+import jsonLoader from "./jsonLoader.js";
+let id = 0;
+
+const webpackConfig = {
+  module: {
+    rules: [
+      {
+        test: /\.json$/,
+        use: [jsonLoader], // 这里可以是fn，也可以是fn数组，实现链式调用
+      },
+    ],
+  },
+};
+
+/**
+ * * 创建资源
+ * 1.获取文件内容
+ * 2.获取以来关系
+ * @param {string} filePath 入口文件路径
+ * @returns {source,deps}
+ */
+function createAsset(filePath) {
+  // 1.获取文件内容
+  let source = fs.readFileSync(filePath, { encoding: "utf-8" });
+  console.log("文件内容", source);
+
+  // 初始化loader
+  const loaders = webpackConfig.module.rules;
+  loaders.forEach(({ test, use }) => {
+    if (test.test(filePath)) {
+      if (Array.isArray(use)) {
+        use.reverse().forEach((fn) => {
+          source = fn(source);
+        });
+      }
+    }
+  });
+
+  // 2.获取以来关系
+  const ast = parser.parse(source, {
+    // parse in strict mode and allow module declarations
+    sourceType: "module",
+
+    // plugins: [
+    //   // enable jsx and flow syntax
+    //   "jsx",
+    //   "flow",
+    // ],
+  });
+
+  console.log("生成的ast", ast);
+
+  const deps = []; // 保存依赖关系
+  // 遍历整个 ast ，拿到代码中的文件路径
+  // babel 提供了这样的遍历工具 @babel/traverse
+  // 这里的 ImportDeclaration 其实就是一个回调函数，函数名就是ast节点的type，在遍历ast节点的时候会别调用
+  traverse.default(ast, {
+    // 处理 import 类型的节点
+    ImportDeclaration({ node }) {
+      deps.push(node.source.value);
+    },
+  });
+
+  const { code } = transformFromAst(ast, null, { presets: ["env"] });
+  console.log("babel-core转化后的code", code);
+
+  return {
+    filePath,
+    code,
+    deps,
+    mapping: {},
+    id: id++,
+  };
+}
+
+function createGraph() {
+  // 得到入口文件的源代码和依赖关系
+  const mainAsset = createAsset("./example/main.js");
+  console.log("得到入口文件源代码和依赖关系", mainAsset);
+
+  // 接下来基于依赖关系找到下一个依赖关系，依次进行
+  // 遍历图，使用广度优先搜索
+  const queue = [mainAsset]; // 保存节点
+
+  for (const asset of queue) {
+    asset.deps.forEach((relativePath) => {
+      // 使用 path 模块处理路径
+      const child = createAsset(path.resolve("./example", relativePath));
+      asset.mapping[relativePath] = child.id;
+      queue.push(child);
+    });
+  }
+
+  return queue;
+}
+
+const graph = createGraph();
+
+function build(graph) {
+  const template = fs.readFileSync("./bundle.ejs", { encoding: "utf-8" });
+
+  // 生成模板需要的数据
+  const data = graph.map((asset) => {
+    const { id, code, mapping } = asset;
+    return {
+      id,
+      code,
+      mapping,
+    };
+  });
+
+  const code = ejs.render(template, { data });
+  console.log("生成的代码", code);
+
+  // 生成文件
+  fs.writeFileSync("./dist/bundle.js", code);
+}
+
+build(graph);
+```
+
+这就简单实现了 json 文件的一个 loader 了，这个比较简单，如果要支持 vue，那就比较复杂了。
+
+## 增加插件机制
+
+loader 用于转换某些类型的模块，而插件则可以用于执行范围更广的任务。包括：打包优化，资源管理，注入环境变量。
+
+插件的实现原理是基于事件机制的，webpack 在不同的阶段会抛出不同的事件，插件编写者可以监听这些插件，webpack 会在这些事件上注入不同的对象参数，插件开发者通过操作这些对象来改变 webpack 的打包行为。
+
+那最核心的就是事件机制了，优秀的 webpack 开发者贴心的将这部分代码抽离出来了叫做 [tapable](https://www.npmjs.com/package/tapable) 我们可以直接使用，这里还有一篇 [参考文章](https://juejin.cn/post/7040982789650382855) 比较详细

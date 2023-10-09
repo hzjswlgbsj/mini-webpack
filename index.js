@@ -4,7 +4,20 @@ import traverse from "@babel/traverse";
 import path from "path";
 import ejs from "ejs";
 import { transformFromAst } from "babel-core";
+import jsonLoader from "./jsonLoader.js";
 let id = 0;
+
+const webpackConfig = {
+  module: {
+    rules: [
+      {
+        test: /\.json$/,
+        use: [jsonLoader], // 这里可以是fn，也可以是fn数组，实现链式调用
+      },
+    ],
+  },
+};
+
 /**
  * * 创建资源
  * 1.获取文件内容
@@ -14,8 +27,20 @@ let id = 0;
  */
 function createAsset(filePath) {
   // 1.获取文件内容
-  const source = fs.readFileSync(filePath, { encoding: "utf-8" });
+  let source = fs.readFileSync(filePath, { encoding: "utf-8" });
   console.log("文件内容", source);
+
+  // 初始化loader
+  const loaders = webpackConfig.module.rules;
+  loaders.forEach(({ test, use }) => {
+    if (test.test(filePath)) {
+      if (Array.isArray(use)) {
+        use.reverse().forEach((fn) => {
+          source = fn(source);
+        });
+      }
+    }
+  });
 
   // 2.获取以来关系
   const ast = parser.parse(source, {
