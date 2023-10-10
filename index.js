@@ -5,6 +5,9 @@ import path from "path";
 import ejs from "ejs";
 import { transformFromAst } from "babel-core";
 import jsonLoader from "./jsonLoader.js";
+import { ChangeOutputPath } from "./ChangeOutputPath.js";
+import { SyncHook, AsyncParallelHook } from "tapable";
+
 let id = 0;
 
 const webpackConfig = {
@@ -16,6 +19,12 @@ const webpackConfig = {
       },
     ],
   },
+  plugins: [new ChangeOutputPath()],
+};
+
+// 增加一个hooks
+const hooks = {
+  emitFile: new SyncHook(["context"]),
 };
 
 /**
@@ -41,6 +50,8 @@ function createAsset(filePath) {
       }
     }
   });
+
+  // 初始化插件
 
   // 2.获取以来关系
   const ast = parser.parse(source, {
@@ -100,6 +111,16 @@ function createGraph() {
   return queue;
 }
 
+function initPlugins() {
+  const plugins = webpackConfig.plugins;
+
+  // 批量注册事件
+  plugins.forEach((plugin) => {
+    plugin.apply(hooks);
+  });
+}
+
+initPlugins();
 const graph = createGraph();
 
 function build(graph) {
@@ -117,9 +138,18 @@ function build(graph) {
 
   const code = ejs.render(template, { data });
   console.log("生成的代码", code);
+  let outputPath = "./dist/bundle.js";
+  // 增加一个上下文信息，用于插件获取当前流程中的一些数据和方法
+  const context = {
+    changeOutputPath(path) {
+      outputPath = path;
+    },
+  };
 
+  // 在生成文件之前触发一个事件，并传入上下文信息
+  hooks.emitFile.call(context);
   // 生成文件
-  fs.writeFileSync("./dist/bundle.js", code);
+  fs.writeFileSync(outputPath, code);
 }
 
 build(graph);
